@@ -115,20 +115,12 @@ async function handleScheduled(env) {
 /**
  * 最终失败处理：
  * - 仅当 url 包含 galaxy
- * - 且 KV 中 flag !== deployed
- * 才调用部署接口并写入 flag（TTL 3 小时）
  */
 async function handleFinalFailure(url, env) {
   try {
     if (!url || !url.includes("galaxy")) {
       return;
     }
-
-    const flag = await env.KV.get("flag");
-    if (flag === "deployed") {
-      return;
-    }
-
     console.warn("⚠️ galaxy 请求最终失败，触发部署接口");
 
     const resp = await fetch(env.DEPLOY_API_URL, {
@@ -149,13 +141,7 @@ async function handleFinalFailure(url, env) {
       return;
     }
     console.log("✅ /deploy 响应:", text);
-
-    // 写入幂等标记，TTL 3 小时（10800 秒）
-    await env.KV.put("flag", "deployed", {
-      expirationTtl: 60 * 60 * 3
-    });
-
-    console.log("✅ 已触发部署并写入 deployed 标记");
+    console.log("✅ 已触发部署操作");
   } catch (e) {
     console.error("❌ 最终失败处理逻辑异常", e);
   }
