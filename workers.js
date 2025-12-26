@@ -4,17 +4,13 @@ export default {
 
     // 仅允许 POST /deploy
     if (url.pathname === "/deploy" && req.method === "POST") {
-
       console.log("➡️ /deploy called");
 
       // ===== Token 鉴权 =====
       const tokenFromHeader = req.headers.get("X-Deploy-Token");
       if (!tokenFromHeader || tokenFromHeader !== env.DEPLOY_TOKEN) {
         console.warn("❌ Unauthorized request");
-        return json(
-          { ok: false, error: "Unauthorized" },
-          401
-        );
+        return json({ ok: false, error: "Unauthorized" }, 401);
       }
 
       try {
@@ -23,10 +19,7 @@ export default {
         return json({ ok: true, result });
       } catch (err) {
         console.error("🚨 deploy error", err);
-        return json(
-          { ok: false, error: err.message },
-          500
-        );
+        return json({ ok: false, error: err.message }, 500);
       }
     }
 
@@ -44,27 +37,24 @@ const FLAG_TTL = 3 * 60 * 60; // 3 小时（秒）
 async function run(env) {
   const {
     GITHUB_TOKEN,
-    GH_OWNER,
-    GH_REPO,
     GH_BRANCH,
-    GH_FILE_PATH
+    GH_CONTENT_API_URL,
+    STATE_KV
   } = env;
 
   console.log("🔧 env check", {
-    owner: GH_OWNER,
-    repo: GH_REPO,
-    branch: GH_BRANCH,
-    path: GH_FILE_PATH,
     hasToken: !!GITHUB_TOKEN,
-    hasKV: !!env.STATE_KV
+    branch: GH_BRANCH,
+    apiUrl: GH_CONTENT_API_URL,
+    hasKV: !!STATE_KV
   });
 
-  if (!GITHUB_TOKEN || !GH_OWNER || !GH_REPO || !GH_FILE_PATH) {
+  if (!GITHUB_TOKEN || !GH_CONTENT_API_URL) {
     throw new Error("必要的环境变量未配置");
   }
 
-  // 幂等控制
-  const flag = await env.STATE_KV.get(FLAG_KEY);
+  // ===== 幂等控制 =====
+  const flag = await STATE_KV.get(FLAG_KEY);
   console.log("🧱 KV flag =", flag);
 
   if (flag === "deployed") {
@@ -75,13 +65,11 @@ async function run(env) {
 
   const file = await getFile(
     GITHUB_TOKEN,
-    GH_OWNER,
-    GH_REPO,
-    GH_FILE_PATH,
+    GH_CONTENT_API_URL,
     GH_BRANCH
   );
 
-  const rawContent = atob(file.content.replace(/\n/g, ""));
+  const rawContent = base64DecodeUtf8(file.content);
   const newContent = updateTimestampSection(rawContent);
 
   if (newContent === rawContent) {
@@ -93,16 +81,14 @@ async function run(env) {
 
   await updateFile(
     GITHUB_TOKEN,
-    GH_OWNER,
-    GH_REPO,
-    GH_FILE_PATH,
+    GH_CONTENT_API_URL,
     GH_BRANCH,
     file.sha,
     newContent
   );
 
-  // 写入 flag
-  await env.STATE_KV.put(FLAG_KEY, "deployed", {
+  // ===== 写入幂等标记 =====
+  await STATE_KV.put(FLAG_KEY, "deployed", {
     expirationTtl: FLAG_TTL
   });
 
@@ -122,10 +108,10 @@ function ghHeaders(token) {
   };
 }
 
-async function getFile(token, owner, repo, path, branch) {
-  const url =
-    `https://api.github.com/repos/${owner}/${repo}/contents/${path}` +
-    (branch ? `?ref=${branch}` : "");
+async function getFile(token, apiUrl, branch) {
+  const url = branch
+    ? `${apiUrl}?ref=${encodeURIComponent(branch)}`
+    : apiUrl;
 
   console.log("➡️ GET", url);
 
@@ -142,18 +128,7 @@ async function getFile(token, owner, repo, path, branch) {
   return res.json();
 }
 
-async function updateFile(
-  token,
-  owner,
-  repo,
-  path,
-  branch,
-  sha,
-  content
-) {
-  const url =
-    `https://api.github.com/repos/${owner}/${repo}/contents/${path}`;
-
+async function updateFile(token, apiUrl, branch, sha, content) {
   const body = {
     message: "chore: auto update README timestamp",
     content: base64EncodeUtf8(content),
@@ -165,9 +140,9 @@ async function updateFile(
     }
   };
 
-  console.log("➡️ PUT", url);
+  console.log("➡️ PUT", apiUrl);
 
-  const res = await fetch(url, {
+  const res = await fetch(apiUrl, {
     method: "PUT",
     headers: ghHeaders(token),
     body: JSON.stringify(body)
@@ -179,7 +154,6 @@ async function updateFile(
     throw new Error(`提交失败: ${res.status}`);
   }
 }
-
 
 // ================= README 时间戳逻辑 =================
 
@@ -211,13 +185,32 @@ function updateTimestampSection(content) {
   return content.trimEnd() + "\n" + section;
 }
 
-// ================= 工具函数 =================
+// ================= 编码工具函数（关键） =================
 
 function base64EncodeUtf8(str) {
   const bytes = new TextEncoder().encode(str);
-  let binary = '';
+  let binary = "";
   for (const b of bytes) {
     binary += String.fromCharCode(b);
   }
   return btoa(binary);
+}
+
+function base64DecodeUtf8(base64) {
+  const binary = atob(base64.replace(/\n/g, ""));
+  const bytes = Uint8Array.from(binary, c => c.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
+// ================= 通用工具 =================
+
+function pad(n) {
+  return String(n).padStart(2, "0");
+}
+
+function json(obj, status = 200) {
+  return new Response(JSON.stringify(obj, null, 2), {
+    status,
+    headers: { "Content-Type": "application/json" }
+  });
 }
