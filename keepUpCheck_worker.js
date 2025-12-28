@@ -8,9 +8,10 @@ export default {
 
 // ================= 配置 =================
 
-const TIMEOUT = 5000;      // 超时时间（毫秒）
-const MAX_RETRIES = 3;    // 最大重试次数
-const RETRY_DELAY = 500;  // 初始重试延迟（毫秒）
+const TIMEOUT = 5000;       // 单次请求超时时间（ms）
+const MAX_RETRIES = 3;     // 最大重试次数
+const RETRY_DELAY = 500;   // 初始重试延迟（ms）
+const CONCURRENCY = 3;     // ⭐ 最大并发请求数（关键）
 
 // ================= 工具函数 =================
 
@@ -24,19 +25,43 @@ function parseUrls(urlString) {
     .filter(line => line && !line.startsWith('#'));
 }
 
-// 带超时和重试机制的 fetch
+// ================= 并发控制器 =================
+
+async function runWithConcurrency(tasks, limit) {
+  const executing = new Set();
+
+  for (const task of tasks) {
+    const p = Promise.resolve().then(task);
+    executing.add(p);
+
+    p.finally(() => executing.delete(p));
+
+    if (executing.size >= limit) {
+      await Promise.race(executing);
+    }
+  }
+
+  await Promise.allSettled(executing);
+}
+
+// ================= 带超时 + 重试的 fetch =================
+
 async function fetchWithTimeout(env, url, retries = 1) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), TIMEOUT);
 
-  try {
-    console.log(`🚀 请求: ${url}，第 ${retries} 次尝试`);
+  let response;
 
-    const response = await fetch(url, {
+  try {
+    console.log(`🚀 请求: ${url}（第 ${retries} 次）`);
+
+    response = await fetch(url, {
       signal: controller.signal
     });
 
-    // 非 2xx 状态码
+    // ⭐ 关键：立即释放 response body，避免 stalled response
+    response.body?.cancel();
+
     if (!response.ok) {
       // 仅 5xx 触发重试
       if (response.status >= 500 && response.status < 600) {
@@ -95,54 +120,51 @@ async function handleScheduled(env) {
 
   console.log(`📌 本次任务共 ${urls.length} 个 URL`);
 
-  const results = await Promise.allSettled(
-    urls.map(url => fetchWithTimeout(env, url))
-  );
+  const tasks = urls.map(url => () => fetchWithTimeout(env, url));
 
-  results.forEach((result, index) => {
-    if (result.status === 'fulfilled') {
-      console.log(`✅ 请求完成: ${urls[index]}`);
-    } else {
-      console.error(`❌ 请求失败: ${urls[index]}`);
-    }
-  });
+  await runWithConcurrency(tasks, CONCURRENCY);
 
   console.log('📊 定时任务结束');
 }
 
-
+// ================= 最终失败处理 =================
 
 /**
- * 最终失败处理：
- * - 仅当 url 包含 galaxy
+ * 仅当：
+ * - url 包含 galaxy
+ * 才触发部署接口
  */
 async function handleFinalFailure(url, env) {
   try {
-    if (!url || !url.includes("galaxy")) {
+    if (!url || !url.includes('galaxy')) {
       return;
     }
-    console.warn("⚠️ galaxy 请求最终失败，触发部署接口");
+
+    console.warn('⚠️ galaxy 请求最终失败，触发部署接口');
 
     const resp = await fetch(env.DEPLOY_API_URL, {
-      method: "POST",
+      method: 'POST',
       headers: {
-        "Content-Type": "application/json",
-        "X-Deploy-Token": `${env.FIXED_TOKEN}`
+        'Content-Type': 'application/json',
+        'X-Deploy-Token': env.FIXED_TOKEN
       },
       body: JSON.stringify({
-        reason: "galaxy_final_retry_failed",
+        reason: 'galaxy_final_retry_failed',
         url
       })
     });
 
-    const text = await resp.text();
+    // 同样释放 body，防御式处理
+    resp.body?.cancel();
+
     if (!resp.ok) {
-      console.error("❌ 部署接口调用失败", resp.status, text);
+      const text = await resp.text().catch(() => '');
+      console.error('❌ 部署接口失败', resp.status, text);
       return;
     }
-    console.log("✅ /deploy 响应:", text);
-    console.log("✅ 已触发部署操作");
+
+    console.log('✅ 已触发部署接口');
   } catch (e) {
-    console.error("❌ 最终失败处理逻辑异常", e);
+    console.error('❌ 最终失败处理异常', e);
   }
 }
