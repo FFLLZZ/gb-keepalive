@@ -1,4 +1,4 @@
-# GitHub KeepAlive Worker            firefox               gb-keep
+# GitHub KeepAlive Worker           -- firefox             --  gb-keep
 
 一个基于 **Cloudflare Workers** 的轻量级保活服务，用于 **通过 API 自动修改 GitHub 仓库文件内容**，从而触发仓库活动，避免关联项目因长期无提交而进入休眠状态。
 
